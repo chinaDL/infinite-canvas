@@ -1,9 +1,7 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { nanoid } from "nanoid";
-
-import i18n from "@/i18n";
+import { NEW_API_BASE_URL } from "@/constant/runtime-config";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -67,28 +65,22 @@ export type WebdavSyncConfig = {
 };
 export type ConfigTabKey = "channels" | "local-proxy" | "preferences" | "prompt-sources" | "webdav" | "local-storage";
 
-export type ChannelCredentialsImportResult = {
-    status: "created" | "updated" | "missing-base-url" | "invalid-base-url";
-    channelName?: string;
-};
-
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
+const fixedConfigKeys = new Set(["baseUrl", "apiKey", "apiFormat", "channelMode", "channels", "models"]);
 const CHANNEL_MODEL_SEPARATOR = "::";
-const OPENAI_BASE_URL = "https://api.openai.com";
-const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
 export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
-    baseUrl: OPENAI_BASE_URL,
+    baseUrl: NEW_API_BASE_URL,
     apiKey: "",
     apiFormat: "openai",
     channels: [
         {
             id: "default",
-            name: i18n.t("config.channels.defaultName"),
-            baseUrl: OPENAI_BASE_URL,
+            name: "New API",
+            baseUrl: NEW_API_BASE_URL,
             apiKey: "",
             apiFormat: "openai",
             models: [
@@ -142,7 +134,7 @@ type ConfigStore = {
     configTab: ConfigTabKey;
     shouldPromptContinue: boolean;
     updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
-    importChannelCredentials: (input: { baseUrl?: string | null; apiKey?: string | null }) => ChannelCredentialsImportResult;
+    setApiKey: (apiKey: string) => void;
     updateWebdavConfig: <K extends keyof WebdavSyncConfig>(key: K, value: WebdavSyncConfig[K]) => void;
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
     openConfigDialog: (shouldPromptContinue?: boolean, tab?: ConfigTabKey) => void;
@@ -209,12 +201,12 @@ export function resolveModelScript(config: AiConfig, value: string) {
 
 function isAiConfigReady(config: AiConfig, model: string) {
     const match = findChannelModel(config, model);
-    return Boolean(match && match.channel.baseUrl.trim() && match.channel.apiKey.trim());
+    return Boolean(match && NEW_API_BASE_URL && match.channel.apiKey.trim());
 }
 
 export const useConfigStore = create<ConfigStore>()(
     persist(
-        (set, get) => ({
+        (set) => ({
             config: defaultConfig,
             webdav: defaultWebdavSyncConfig,
             isConfigOpen: false,
@@ -222,17 +214,9 @@ export const useConfigStore = create<ConfigStore>()(
             shouldPromptContinue: false,
             updateConfig: (key, value) =>
                 set((state) => ({
-                    config: {
-                        ...state.config,
-                        [key]: value,
-                    },
+                    config: fixedConfig({ ...state.config, [key]: value }),
                 })),
-            importChannelCredentials: (input) => {
-                const currentConfig = get().config;
-                const result = upsertChannelCredentials(currentConfig, input);
-                if (result.config !== currentConfig) set({ config: result.config });
-                return { status: result.status, channelName: result.channelName };
-            },
+            setApiKey: (apiKey) => set((state) => ({ config: fixedConfig({ ...state.config, channels: [{ ...state.config.channels[0], apiKey: apiKey.trim() }] }) })),
             updateWebdavConfig: (key, value) =>
                 set((state) => ({
                     webdav: {
@@ -247,44 +231,13 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
-            partialize: (state) => ({ config: state.config, webdav: state.webdav }),
+            partialize: (state) => ({ config: serializeAiConfig(state.config), webdav: state.webdav }),
             merge: (persisted, current) => {
-                const persistedState = (persisted || {}) as Partial<ConfigStore>;
-                const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
-                const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
-                const config = { ...defaultConfig, ...persistedConfig };
-                if (!Array.isArray(persistedConfig.channels)) config.channels = [];
-                const channels = normalizeChannels(config);
-                const models = modelOptionsFromChannels(channels);
+                const saved = (persisted || {}) as { config?: SavedAiConfig; webdav?: WebdavSyncConfig };
                 return {
                     ...current,
-                    webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
-                    config: {
-                        ...config,
-                        channelMode: "local",
-                        apiFormat: normalizeApiFormat(config.apiFormat),
-                        channels,
-                        models,
-                        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
-                        videoModel: normalizeModelOptionValue(config.videoModel, channels),
-                        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
-                        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
-                        audioVoice: config.audioVoice || defaultConfig.audioVoice,
-                        audioFormat: config.audioFormat || defaultConfig.audioFormat,
-                        audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
-                        audioInstructions: config.audioInstructions || "",
-                        reasoningEffort: config.reasoningEffort || "auto",
-                        videoSeconds: config.videoSeconds || "6",
-                        vquality: config.vquality || "720",
-                        videoGenerateAudio: config.videoGenerateAudio || "true",
-                        videoWatermark: config.videoWatermark || "false",
-                        videoMode: config.videoMode === "reference" ? "reference" : "frames",
-                        canvasImageCount: config.canvasImageCount || "3",
-                        proxyEnabled: Boolean(config.proxyEnabled),
-                        proxyUrl: config.proxyUrl || DEFAULT_LOCAL_PROXY_URL,
-                        nodeRegenerateBehavior: config.nodeRegenerateBehavior === "overwrite" ? "overwrite" : "new-node",
-                        autoFocusOnSelect: Boolean(config.autoFocusOnSelect),
-                    },
+                    config: restoreAiConfig(saved.config),
+                    webdav: { ...defaultWebdavSyncConfig, ...saved.webdav },
                 };
             },
         },
@@ -293,7 +246,7 @@ export const useConfigStore = create<ConfigStore>()(
 
 export function useEffectiveConfig() {
     const config = useConfigStore((state) => state.config);
-    return useMemo(() => ({ ...config, channelMode: "local" as const }), [config]);
+    return useMemo(() => fixedConfig(config), [config]);
 }
 
 /** Normalize a mixed list of raw model names or model objects into deduped ChannelModel entries. */
@@ -312,79 +265,41 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
 }
 
 export function createModelChannel(channel?: Partial<ModelChannel>): ModelChannel {
-    const apiFormat = normalizeApiFormat(channel?.apiFormat);
     return {
-        id: channel?.id?.trim() || nanoid(),
-        name: channel?.name?.trim() || i18n.t("config.channels.newName"),
-        baseUrl: channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
-        apiKey: channel?.apiKey || "",
-        apiFormat,
+        id: "default",
+        name: "New API",
+        baseUrl: NEW_API_BASE_URL,
+        apiFormat: "openai",
+        apiKey: typeof channel?.apiKey === "string" ? channel.apiKey : "",
         models: normalizeChannelModels(channel?.models),
     };
 }
 
-export function upsertChannelCredentials(
-    config: AiConfig,
-    input: { baseUrl?: string | null; apiKey?: string | null },
-): ChannelCredentialsImportResult & { config: AiConfig } {
-    const rawBaseUrl = input.baseUrl?.trim() || "";
-    if (!rawBaseUrl) return { status: "missing-base-url", config };
-    if (!isHttpBaseUrl(rawBaseUrl)) return { status: "invalid-base-url", config };
+export function fixedConfig(config: AiConfig): AiConfig {
+    const channel = createModelChannel(config.channels[0]);
+    return { ...config, channelMode: "local", baseUrl: NEW_API_BASE_URL, apiFormat: "openai", apiKey: channel.apiKey, channels: [channel], models: modelOptionsFromChannels([channel]) };
+}
 
-    const baseUrl = normalizeImportedBaseUrl(rawBaseUrl);
-    const apiKey = input.apiKey?.trim() || "";
-    const matchingIndex = config.channels.findIndex((channel) => normalizedBaseUrlKey(channel.baseUrl) === normalizedBaseUrlKey(baseUrl));
+type SavedPreferences = Omit<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "channelMode" | "channels" | "models">;
+export type SavedAiConfig = SavedPreferences & { channel: Pick<ModelChannel, "apiKey" | "models"> };
 
-    if (matchingIndex >= 0) {
-        const existing = config.channels[matchingIndex];
-        if (existing.baseUrl === baseUrl && (!apiKey || existing.apiKey === apiKey)) {
-            return { status: "updated", channelName: existing.name, config };
-        }
-        const updated = { ...existing, baseUrl, ...(apiKey ? { apiKey } : {}) };
-        const channels = config.channels.map((channel, index) => (index === matchingIndex ? updated : channel));
-        return { status: "updated", channelName: existing.name, config: { ...config, channels } };
+export function serializeAiConfig(config: AiConfig): SavedAiConfig {
+    const preferences = Object.fromEntries(Object.keys(defaultConfig).filter((key) => !fixedConfigKeys.has(key)).map((key) => [key, config[key as keyof AiConfig]])) as SavedPreferences;
+    const channel = createModelChannel(config.channels[0]);
+    return { ...preferences, channel: { apiKey: channel.apiKey, models: channel.models } };
+}
+
+export function restoreAiConfig(saved?: Partial<SavedAiConfig>): AiConfig {
+    const config = { ...defaultConfig };
+    // Only known scalar preferences and the single channel's key/models belong to
+    // a user's file. Neither arbitrary channel arrays nor addresses are accepted.
+    for (const key of Object.keys(defaultConfig) as Array<keyof AiConfig>) {
+        if (fixedConfigKeys.has(key)) continue;
+        const value = saved?.[key as keyof SavedPreferences];
+        if (typeof value === typeof defaultConfig[key]) Object.assign(config, { [key]: value });
     }
-
-    const channel = createModelChannel({
-        name: importedChannelName(baseUrl),
-        baseUrl,
-        apiKey,
-        apiFormat: "openai",
-        models: [],
-    });
-    return { status: "created", channelName: channel.name, config: { ...config, channels: [...config.channels, channel] } };
-}
-
-function isHttpBaseUrl(baseUrl: string) {
-    try {
-        const url = new URL(baseUrl);
-        return (url.protocol === "http:" || url.protocol === "https:") && Boolean(url.hostname);
-    } catch {
-        return false;
-    }
-}
-
-function normalizedBaseUrlKey(baseUrl: string) {
-    try {
-        return stripTrailingApiVersion(normalizeImportedBaseUrl(baseUrl));
-    } catch {
-        return stripTrailingApiVersion(baseUrl.trim().replace(/\/+$/, ""));
-    }
-}
-
-function normalizeImportedBaseUrl(baseUrl: string) {
-    const url = new URL(baseUrl.trim());
-    url.hash = "";
-    return url.toString().replace(/\/+$/, "");
-}
-
-function stripTrailingApiVersion(baseUrl: string) {
-    return baseUrl.replace(/\/v1$/i, "");
-}
-
-function importedChannelName(baseUrl: string) {
-    const hostname = new URL(baseUrl).hostname;
-    return hostname.replace(/^(?:www|api)\./i, "") || i18n.t("config.channels.newName");
+    config.channels = [createModelChannel(saved?.channel ?? defaultConfig.channels[0])];
+    return fixedConfig(config);
 }
 
 export function encodeChannelModel(channelId: string, model: string) {
@@ -432,7 +347,7 @@ export function resolveModelChannel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
     const model = decoded?.model || value;
     const matched = decoded ? config.channels.find((channel) => channel.id === decoded.channelId) : config.channels.find((channel) => channel.models.some((item) => item.name === model));
-    return matched || config.channels[0] || createModelChannel({ id: "default", name: i18n.t("config.channels.defaultName"), baseUrl: config.baseUrl, apiKey: config.apiKey, apiFormat: config.apiFormat, models: config.models.map(modelOptionName).map((name) => ({ name, capability: guessCapability(name) })) });
+    return matched || config.channels[0] || createModelChannel({ id: "default", name: "New API", baseUrl: config.baseUrl, apiKey: config.apiKey, apiFormat: config.apiFormat, models: config.models.map(modelOptionName).map((name) => ({ name, capability: guessCapability(name) })) });
 }
 
 export function resolveModelRequestConfig(config: AiConfig, value: string) {
@@ -440,52 +355,19 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
     return {
         ...config,
         model: modelOptionName(value || config.model),
-        baseUrl: channel.baseUrl,
+        baseUrl: NEW_API_BASE_URL,
         apiKey: channel.apiKey,
-        apiFormat: channel.apiFormat,
+        apiFormat: "openai" as const,
     };
-}
-
-function normalizeChannels(config: AiConfig) {
-    const persistedChannels = Array.isArray(config.channels) ? config.channels : [];
-    const channels = persistedChannels.map((channel, index) =>
-        createModelChannel({
-            ...channel,
-            id: channel.id || (index === 0 ? "default" : `channel-${index + 1}`),
-            name: channel.name || (index === 0 ? i18n.t("config.channels.defaultName") : i18n.t("config.channels.indexedName", { index: index + 1 })),
-            models: normalizeChannelModels(channel.models),
-        }),
-    );
-    if (!channels.length) {
-        channels.push(
-            createModelChannel({
-                id: "default",
-                name: i18n.t("config.channels.defaultName"),
-                baseUrl: config.baseUrl || defaultConfig.baseUrl,
-                apiKey: config.apiKey || "",
-                apiFormat: config.apiFormat || defaultConfig.apiFormat,
-                models: normalizeChannelModels([config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel].map(modelOptionName)),
-            }),
-        );
-    }
-    return channels;
-}
-
-export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
-    if (apiFormat === "gemini") return GEMINI_BASE_URL;
-    return OPENAI_BASE_URL;
-}
-
-function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
-    return apiFormat === "gemini" ? apiFormat : "openai";
 }
 
 function uniqueModelOptions(models: string[]) {
     return Array.from(new Set((models || []).map((model) => model.trim()).filter(Boolean)));
 }
 
-export function buildApiUrl(baseUrl: string, path: string) {
-    const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
+export function buildApiUrl(_baseUrl: string, path: string) {
+    if (!NEW_API_BASE_URL) throw new Error("未配置 NEW_API_BASE_URL");
+    const normalizedBaseUrl = NEW_API_BASE_URL;
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
     const apiBaseUrl = lowerBaseUrl.endsWith("/v1") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
     return withLocalProxy(`${apiBaseUrl}${path}`);

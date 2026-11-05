@@ -14,8 +14,15 @@ sanitize_id() {
 GA4_ID=$(sanitize_id "${ANALYTICS_GA4_ID:-}")
 BAIDU_ID=$(sanitize_id "${ANALYTICS_BAIDU_ID:-}")
 
+NEW_API_URL=$(printf '%s' "${NEW_API_BASE_URL:-}" | tr -cd 'A-Za-z0-9:/._-')
+if [ "$NEW_API_URL" != "${NEW_API_BASE_URL:-}" ]; then
+    echo "Invalid NEW_API_BASE_URL" >&2
+    exit 1
+fi
+
 cat > /usr/share/nginx/html/config.js <<EOF
 window.__RUNTIME_CONFIG__ = {
+  NEW_API_BASE_URL: "${NEW_API_URL}",
   ANALYTICS_GA4_ID: "${GA4_ID}",
   ANALYTICS_BAIDU_ID: "${BAIDU_ID}"
 };
